@@ -1,0 +1,10 @@
+{
+  "map": "Town01",
+  "carla_version": "0.9.16",
+  "scenarios": [
+    {"name": "left-clear", "spawn": 241, "destination": 225, "weather": "ClearNoon", "traffic": 0, "turn": "left"},
+    {"name": "right-clear", "spawn": 11, "destination": 153, "weather": "ClearNoon", "traffic": 0, "turn": "right"},
+    {"name": "left-traffic", "spawn": 241, "destination": 225, "weather": "ClearNoon", "traffic": 8, "turn": "left"},
+    {"name": "left-traffic-wet", "spawn": 241, "destination": 225, "weather": "WetCloudyNoon", "traffic": 8, "turn": "left"}
+  ]
+}

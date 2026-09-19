@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen-drive-carla"
+version = "0.1.0"
+description = "CARLA recording and offline Qwen-Drive feasibility tools"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pillow>=10"]
+
+[project.optional-dependencies]
+carla = ["carla==0.9.16", "networkx>=3"]
+test = ["pytest>=8"]
+
+[project.scripts]
+drive-check = "qwen_drive_carla.environment:main"
+drive-record = "qwen_drive_carla.record:main"
+drive-benchmark = "qwen_drive_carla.benchmark:main"
+drive-run = "qwen_drive_carla.run:main"
+drive-serve = "qwen_drive_carla.remote:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+qwen_drive_carla = ["dashboard.html"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

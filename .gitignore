@@ -1,0 +1,10 @@
+.venv*/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+vendor/
+models/
+downloads/
+simulator/
+outputs/
+.cache/

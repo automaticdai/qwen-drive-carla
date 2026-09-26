@@ -30,12 +30,14 @@ def test_surround_requires_all_views_and_rigid_calibration():
         decode_surround(data)
 
 
-def test_shared_debug_request_frame_matching():
+@pytest.mark.parametrize('sample_count', [1, 3])
+def test_shared_debug_request_frame_matching(sample_count):
     class Planner:
         loading_info=dict(bev=True)
         def debug_payload(self,payload,bev):
             assert len(bev[0])==6
-            return np.ones((50,3)),dict(seconds=.1),dict(source_frame=payload['token'])
+            shape = (50, 3) if sample_count == 1 else (sample_count, 50, 3)
+            return np.ones(shape),dict(seconds=.1),dict(source_frame=payload['token'])
     server=make_server(Planner(),0)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     try:
@@ -46,6 +48,8 @@ def test_shared_debug_request_frame_matching():
         records=[dict(frame=i+1,timestamp=i*.1,pose=[i,0,0],velocity=[1,0],acceleration=[0,0],command='straight',images=images) for i in range(16)]
         points,response=client.debug(records,cameras)
         assert points.shape==(50,3) and response['bev']['source_frame']=='16'
+        assert len(response['candidates']) == sample_count
+        assert response['metrics']['candidate_count'] == sample_count
         assert response['qwen_inputs']['source_frame']=='16'
         assert response['qwen_inputs']['ego_velocity']==[1.,0.]
         client.request=lambda *args:dict(protocol=1,request_id='stale',token='15')

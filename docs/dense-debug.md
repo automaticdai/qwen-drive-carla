@@ -167,3 +167,51 @@ With CARLA and the dashboard running, run `scripts/tile_dense_debug_windows.ps1`
 in Windows PowerShell to place CARLA on the left and the dashboard on the right.
 On a 2560×1440 desktop, window borders leave approximately 624 pixels for the
 responsive dashboard. Camera inputs sent to Qwen retain their configured sizes.
+
+## Local RTX 5080 preview
+
+Start local Windows CARLA at Epic quality with a 1280×720 window, then:
+
+```bash
+.venv-qwen/bin/python scripts/run_dense_debug.py --local-planner \
+  --precision nf4 --image-profile small --host 172.30.64.1 \
+  --seconds 120 --start-paused --output outputs/local-preview-NEW
+```
+
+Open http://localhost:8877 and click Run. The model executes in the local runner;
+no cloud service or SSH tunnel is used. This mode keeps the six camera previews,
+trajectory, instruments and Run/Pause/Step/Reset controls. BEV perception is
+disabled and its map/occupancy panels are hidden. Planning uses NF4 language
+layers with BF16 vision/planner and the small image profile by default. The model
+stays loaded across scenario resets. The dashboard reports local request time.
+This is a lower-memory preview, not the full BF16/high + BEV cloud configuration.
+
+## CARLA-assisted trajectory guard
+
+New runs default to unassisted Qwen evaluation (`--safety-mode off`, one sample, no fallback). See [the evaluation protocol](qwen-evaluation.md).
+
+With explicit `--safety-mode carla`, the dashboard identifies the driver
+as **Qwen + CARLA guard**: simulator road geometry and vehicle boxes are used to
+reject unsafe trajectories and override controls with braking. This assistance
+runs locally in both GPU configurations and does not depend on the BEV head.
+Use `--safety-mode off` for an explicitly unassisted comparison.
+
+The guard checks all five seconds of each proposal, permits changes between the
+three allowed lanes, and checks a stopping envelope every control tick. Rejected
+plans are retained with reasons; per-tick logs include proposed/applied controls,
+assistance decisions and vehicle snapshots. It can stop frequently and is not
+an overtaking planner. See [the diagnosis, checks and validation limits](driving-diagnosis.md).
+
+### Multiple Qwen candidates
+
+Use `--candidate-count 3` for three samples in assisted runs. Every sample
+must pass the guard before it can be selected; if all fail, the vehicle brakes.
+Use `--candidate-count 1` for the previous one-sample baseline. The dashboard and
+prediction logs expose candidate acceptance and selection. See [candidate
+selection and the comparison runner](candidate-selection.md) for remote service
+configuration and evaluation commands.
+
+For the tested assisted-following mode, add `--safety-mode carla --candidate-count 3 --fallback lane-follow`. It is
+explicitly map-based CARLA assistance: two 20-second local runs travelled
+12.3–12.4 m with zero collisions or lane events. Three Qwen samples without that
+fallback still stalled. [Measured results and limitations](candidate-selection.md#measured-local-results--2026-09-26).

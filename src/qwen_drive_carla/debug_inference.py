@@ -13,6 +13,7 @@ from .adapter import scene_payload, input_snapshot
 from .bev import SURROUND, camera_calibration
 from .remote import RemotePlanner, VERSION, MAX_REQUEST, encode_scene, json_bytes, make_server
 from .image_transport import DebugImageEncoder, ImageCacheMiss
+from .candidates import candidate_array, candidate_count
 
 
 def image_string(image, format='PNG'):
@@ -91,6 +92,11 @@ class RemoteDebugPlanner(RemotePlanner):
         trajectory = np.asarray(response['trajectory'], dtype=float)
         if trajectory.shape != (50, 3) or not np.isfinite(trajectory).all():
             raise ValueError('Invalid debug trajectory')
+        candidates = candidate_array(response.get('candidates', [trajectory]), finite=True)
+        if not np.array_equal(candidates[0], trajectory):
+            raise ValueError('Primary trajectory does not match candidate zero')
+        response['candidates'] = candidates.tolist()
+        response['metrics']['candidate_count'] = len(candidates)
         response['metrics'].update(request_seconds=time.perf_counter() - started,
                                    request_bytes=stages.get('wire_bytes', len(body)))
         response['metrics'].update(stages)
@@ -98,7 +104,33 @@ class RemoteDebugPlanner(RemotePlanner):
         return trajectory, response
 
 
-def shared_planner(model_path, image_profile):
+class LocalDebugPlanner:
+    """In-process planning for the dashboard, without the BEV perception head."""
+    def __init__(self, model_path, precision='nf4', image_profile='small', num_candidates=3):
+        self.num_candidates = candidate_count(num_candidates)
+        from .planner import QwenPlanner
+        self.planner = QwenPlanner(model_path, precision=precision, image_profile=image_profile)
+        self.loading_info = {**self.planner.loading_info, 'bev': False, 'execution': 'local',
+                             'candidate_count': self.num_candidates}
+
+    def debug(self, records, cameras):
+        started = time.perf_counter()
+        payload = scene_payload(records, len(records) - 1)
+        archive = None
+        if getattr(self, 'input_directory', None) is not None:
+            from .input_archive import save_payload
+            archive = save_payload(self.input_directory, payload, self.loading_info)
+        candidates, metrics = self.planner.plan_candidates_payload(payload, self.num_candidates)
+        trajectory = candidates[0]
+        metrics.update(request_seconds=time.perf_counter() - started, execution='local',
+                       image_codec='in-memory RGB', wire_bytes=0)
+        return trajectory, dict(trajectory=trajectory.tolist(), candidates=candidates.tolist(), token=payload['token'],
+                                bev=None, metrics=metrics, input_archive=str(archive) if archive else None,
+                                qwen_inputs=input_snapshot(payload, records[-1]['timestamp']))
+
+
+def shared_planner(model_path, image_profile, num_candidates=3):
+    num_candidates = candidate_count(num_candidates)
     from .planner import QwenPlanner
     from qwen_drive_perception import QwenDrivePerception
     from qwen_drive_perception.dataset import PerceptionProcessor, PerceptionFrame
@@ -112,7 +144,8 @@ def shared_planner(model_path, image_profile):
                 dtype=self.torch.bfloat16, local_files_only=True).to('cuda').eval()
             self.processor = PerceptionProcessor(AutoTokenizer.from_pretrained(str(model_path), local_files_only=True))
             self.perception.attach(self.model.vlm, self.processor)
-            self.loading_info.update(bev=True, shared_vlm=True, bev_image_size=[896, 512], debug_image_cache=True)
+            self.loading_info.update(bev=True, shared_vlm=True, bev_image_size=[896, 512], debug_image_cache=True,
+                                     candidate_count=num_candidates)
 
         def debug_payload(self, payload, surround):
             images, calibration = surround
@@ -132,7 +165,7 @@ def shared_planner(model_path, image_profile):
                 def image(self, camera):
                     return images[camera]
 
-            trajectory, metrics = self.plan_payload(payload)
+            trajectory, metrics = self.plan_candidates_payload(payload, num_candidates)
             # Release planning workspaces before the different BEV allocation pattern.
             self.torch.cuda.empty_cache()
             self.torch.cuda.reset_peak_memory_stats()
@@ -168,8 +201,9 @@ def main():
     parser.add_argument('--model', type=Path, default=Path('models/Qwen-Drive-1.0-4B'))
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--image-profile', choices=['small', 'high'], default='high')
+    parser.add_argument('--candidate-count', type=int, choices=range(1, 7), default=3)
     args = parser.parse_args()
-    with make_server(shared_planner(args.model, args.image_profile), args.port) as server:
+    with make_server(shared_planner(args.model, args.image_profile, args.candidate_count), args.port) as server:
         print('Shared planning + BEV service ready', flush=True)
         try:
             server.serve_forever()

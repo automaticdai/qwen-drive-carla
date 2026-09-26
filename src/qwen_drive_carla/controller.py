@@ -59,6 +59,11 @@ class TrajectoryTracker:
         self.previous_error = None
         return Control(reason=reason)
 
+    def clear_plan(self):
+        self.world_xy = self.plan_time = self.speeds = None
+        self.integral = 0.0
+        self.previous_error = None
+
     def step(self, pose, speed, timestamp, dt=0.1):
         if (len(pose) != 3 or not np.isfinite(pose).all() or
                 not all(math.isfinite(x) for x in (speed, timestamp, dt)) or dt <= 0):

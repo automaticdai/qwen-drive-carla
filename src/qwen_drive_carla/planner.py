@@ -4,6 +4,7 @@ import numpy as np
 
 from .adapter import scene_payload
 from .model_loading import load_model
+from .candidates import candidate_array, candidate_count
 
 
 class QwenPlanner:
@@ -26,6 +27,11 @@ class QwenPlanner:
         return self.plan_payload(scene_payload(records, len(records) - 1))
 
     def plan_payload(self, payload):
+        candidates, metrics = self.plan_candidates_payload(payload, num_samples=1)
+        return candidates[0], metrics
+
+    def plan_candidates_payload(self, payload, num_samples=3):
+        num_samples = candidate_count(num_samples)
         from qwen_drive import CameraFrame, DrivingScene, InferenceMode
         payload = dict(payload)
         payload["views"] = {tag: [CameraFrame(image, target_size=self.image_sizes[i])
@@ -36,12 +42,15 @@ class QwenPlanner:
         started = time.perf_counter()
         with self.torch.inference_mode():
             mode = InferenceMode.REASONING_PLANNING if self.planning_mode == "reasoning" else InferenceMode.DIRECT_PLANNING
-            result = self.model.run(mode, scene=scene, num_samples=1)
+            result = self.model.run(mode, scene=scene, num_samples=num_samples)
         self.torch.cuda.synchronize()
         # Return raw predictions so the runner can retain rejected samples for
         # diagnosis. Validation happens before any proposal reaches control.
-        points = np.asarray(result.trajectories[0])
+        points = candidate_array(result.trajectories)
+        if len(points) != num_samples:
+            raise ValueError('Model returned an unexpected candidate count')
         return points, dict(seconds=time.perf_counter() - started, precision=self.precision,
                             planning_mode=self.planning_mode, reasoning=result.reasoning,
+                            candidate_count=len(points), seed_base=getattr(self.model.config, 'noise_seed', None),
                             peak_allocated_bytes=self.torch.cuda.max_memory_allocated(),
                             peak_reserved_bytes=self.torch.cuda.max_memory_reserved())

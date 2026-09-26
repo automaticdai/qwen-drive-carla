@@ -153,3 +153,25 @@ def test_session_cleanup_continues_after_actor_failure():
     with pytest.warns(UserWarning, match="cleanup"):
         session.close()
     assert calls == ["stop", "destroy", "restored"]
+
+
+def test_identical_handover_brakes_are_acknowledged_without_advancing_world():
+    from types import SimpleNamespace as NS
+    from qwen_drive_carla.controller import Control
+    received = []
+    session = CarlaSession()
+    session.vehicle = NS(id=42)  # No cached actor.apply_control path is available.
+    session.carla = NS(VehicleControl=lambda **k: NS(**k),
+                       command=NS(ApplyVehicleControl=lambda actor_id, control: (actor_id, control)))
+    def batch(commands, do_tick):
+        assert do_tick is False
+        received.extend(commands)
+        return [NS(error='')]
+    session.client = NS(apply_batch_sync=batch)
+    session.apply(Control())
+    session.apply(Control())
+    assert len(received) == 2
+    assert all(actor_id == 42 and command.brake == 1 and command.throttle == 0 for actor_id, command in received)
+    session.client = NS(apply_batch_sync=lambda *a: [NS(error='actor not found')])
+    with pytest.raises(RuntimeError, match='not acknowledged'):
+        session.apply(Control())

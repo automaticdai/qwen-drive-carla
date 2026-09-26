@@ -224,6 +224,11 @@ def make_server(planner, port=8765):
                 else:
                     trajectory, metrics = planner.plan_payload(payload)
                 trajectory = np.asarray(trajectory, dtype=float)
+                if self.path == '/debug' and trajectory.ndim == 3:
+                    from .candidates import candidate_array
+                    candidates = candidate_array(trajectory, finite=True)
+                    extra['candidates'] = candidates.tolist()
+                    trajectory = candidates[0]
                 if trajectory.shape != (50, 3) or not np.isfinite(trajectory).all():
                     raise ValueError('Model returned a malformed or non-finite trajectory')
                 metrics = {**metrics, 'server_decode_seconds': decode_seconds,

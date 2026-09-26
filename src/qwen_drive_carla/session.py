@@ -51,6 +51,7 @@ class CarlaSession:
         import carla
         self.carla = carla
         client = carla.Client(self.host, self.port)
+        self.client = client
         client.set_timeout(self.timeout)
         if client.get_client_version() != client.get_server_version():
             raise RuntimeError("CARLA client and server versions must match")
@@ -78,6 +79,8 @@ class CarlaSession:
             if not 0 <= self.spawn_index < len(spawns):
                 raise ValueError(f"spawn-index must be in [0, {len(spawns) - 1}]")
             self.vehicle = self.world.spawn_actor(blueprints.find("vehicle.tesla.model3"), self.spawn_transform or spawns[self.spawn_index])
+            self.metadata['ego_control'] = {'transport': 'acknowledged batch; do_tick=False; bypasses actor control cache',
+                                             'observed_control': 'CARLA snapshot; preceding tick command'}
             self.actors.append(self.vehicle)
             self.signal_actors = list(self.world.get_actors().filter('traffic.traffic_light'))
             stop_lines = []
@@ -164,7 +167,15 @@ class CarlaSession:
                                       traffic_spawned=len(spawned), actors=spawned)
 
     def apply(self, control):
-        self.vehicle.apply_control(self.carla.VehicleControl(throttle=control.throttle, brake=control.brake, steer=control.steer))
+        # Vehicle.apply_control caches identical manual commands. Traffic Manager
+        # changes do not update that cache, so the first handover brake can be
+        # silently skipped. Bypass it and wait for server acknowledgement before
+        # the next physics tick; do not advance the world in this call.
+        command = self.carla.VehicleControl(throttle=control.throttle, brake=control.brake, steer=control.steer)
+        responses = self.client.apply_batch_sync([self.carla.command.ApplyVehicleControl(self.vehicle.id, command)], False)
+        if len(responses) != 1 or responses[0].error:
+            raise RuntimeError('Vehicle control was not acknowledged: ' +
+                               (responses[0].error if responses else 'missing response'))
 
     def tick(self, command="straight"):
         frame = self.world.tick(self.timeout)
@@ -197,7 +208,9 @@ class CarlaSession:
             x=box.location.x + box.extent.x, y=box.location.y, z=box.location.z))
         for event in self.signal_monitor.update([front.x, front.y, front.z], signal_states):
             self.events.put(dict(event, frame=frame, timestamp=snapshot.timestamp.elapsed_seconds))
+        observed = self.vehicle.get_control()
         return dict(frame=frame, timestamp=snapshot.timestamp.elapsed_seconds,
+                    observed_control=dict(throttle=observed.throttle, brake=observed.brake, steer=observed.steer),
                     nearest_traffic_m=min(distances) if distances else None,
                     at_traffic_light=self.vehicle.is_at_traffic_light(),
                     traffic_light_id=light.id if light else None,

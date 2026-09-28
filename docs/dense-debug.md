@@ -186,6 +186,22 @@ layers with BF16 vision/planner and the small image profile by default. The mode
 stays loaded across scenario resets. The dashboard reports local request time.
 This is a lower-memory preview, not the full BF16/high + BEV cloud configuration.
 
+To record one unassisted BF16 episode and exit:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+.venv-qwen/bin/python scripts/run_dense_debug.py --local-planner \
+  --precision bf16 --image-profile small --host 172.30.64.1 \
+  --candidate-count 1 --safety-mode off --fallback none --seconds 30 \
+  --once --record-video --output outputs/bf16-video-NEW
+```
+
+`--record-video` requires ffmpeg and saves `episode-001/drive.mp4` plus its
+source PNG frames. The video contains a front view, left/right insets, and
+simulation time, speed, driver, and outcome labels. Playback is 10 fps simulation
+time, omitting inference pauses. It includes the autopilot warmup and stops when
+the episode terminates, which can be earlier than `--seconds`.
+
 ## CARLA-assisted trajectory guard
 
 New runs default to unassisted Qwen evaluation (`--safety-mode off`, one sample, no fallback). See [the evaluation protocol](qwen-evaluation.md).

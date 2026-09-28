@@ -4,6 +4,8 @@ from collections import deque
 from dataclasses import asdict
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import time
 import traceback
 
@@ -19,6 +21,24 @@ from qwen_drive_carla.dense_traffic import ROAD, EGO_LANE, LANES, START_S, Overt
 from qwen_drive_carla.session import CarlaSession
 from qwen_drive_carla.safety import (CarlaRoad, Decision, GroundTruthGuard,
                                      actor_footprint, capture_obstacles)
+
+
+def save_video_frame(output, record, row, loading_info, evaluation_mode, tick):
+    """Record simulation-time front/side views independently of dashboard refresh."""
+    from PIL import Image, ImageDraw, ImageFont
+    canvas = Image.new('RGB', (1280, 736), '#101820')
+    canvas.paste(record['images']['front'].resize((960, 576)), (160, 56))
+    for name, x in [('front_left', 0), ('front_right', 960)]:
+        canvas.paste(record['images'][name].resize((320, 192)), (x, 440))
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.truetype('DejaVuSans.ttf', 21)
+    title = f"Qwen {loading_info.get('precision', 'remote').upper()} | {loading_info.get('image_profile', '')} | {evaluation_mode}"
+    draw.text((18, 16), title, font=font, fill='white')
+    draw.text((18, 644), f"Simulation {row['sim_seconds']:.1f}s | {row['speed_mps']:.2f} m/s | {row['driver']} | {row['status']}", font=font, fill='white')
+    draw.text((18, 682), '10 fps simulation replay; inference pauses omitted | Side insets: left / right', font=font, fill='#b7c8d8')
+    directory = output / 'video-frames'
+    directory.mkdir(exist_ok=True)
+    canvas.save(directory / f'{tick:06d}.png')
 
 
 def episode(args, dashboard, output):
@@ -208,6 +228,8 @@ def episode(args, dashboard, output):
                                        plan_decision=asdict(plan_decision)),
                            obstacles=[asdict(obstacle) for obstacle in obstacles])
                 log.write(json.dumps(row)+'\n'); log.flush()
+                if getattr(args, 'record_video', False):
+                    save_video_frame(output, record, row, planner.loading_info, evaluation_mode, tick)
                 dashboard.publish(phase='driving' if tick>=15 else 'autopilot warmup', control=asdict(control),
                                   safety=row['safety'], driver=row['driver'])
                 if summary['status']!='running':
@@ -223,6 +245,16 @@ def episode(args, dashboard, output):
             raise
     finally:
         summary.update(wall_seconds=time.perf_counter()-started,cleanup_errors=session.metadata.get('cleanup_errors'))
+        if getattr(args, 'record_video', False) and (output / 'video-frames').exists():
+            video = output / 'drive.mp4'
+            result = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-n',
+                                     '-framerate', '10', '-i', str(output / 'video-frames' / '%06d.png'),
+                                     '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p',
+                                     '-movflags', '+faststart', str(video)], capture_output=True, text=True)
+            if result.returncode:
+                summary['video_error'] = result.stderr
+            else:
+                summary['video'] = str(video)
         (output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
         (output/'metadata.json').write_text(json.dumps({**session.metadata,'cloud':planner.loading_info,
                                                       'image_transport':args.image_transport},indent=2)+'\n')
@@ -244,6 +276,8 @@ def main():
     parser.add_argument('--dashboard-port',type=int,default=8877)
     parser.add_argument('--seconds',type=float,default=30)
     parser.add_argument('--start-paused',action='store_true')
+    parser.add_argument('--once', action='store_true', help='Exit after one episode')
+    parser.add_argument('--record-video', action='store_true', help='Save a 10 fps simulation-time MP4 and source frames')
     parser.add_argument('--safety-mode', choices=['carla', 'off'], default='off',
                         help='Default off evaluates Qwen; carla enables ground-truth assistance')
     parser.add_argument('--fallback', choices=['none', 'lane-follow'], default='none',
@@ -252,6 +286,8 @@ def main():
                         help='Cached lossless WebP, original PNG, or explicit lossy JPEG quality 95')
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
+    if args.record_video and not shutil.which('ffmpeg'):
+        parser.error('--record-video requires ffmpeg')
     if args.fallback != 'none' and args.safety_mode != 'carla':
         parser.error('Lane-following fallback requires --safety-mode carla')
     if not np.isfinite(args.seconds) or not 2<=args.seconds<=120:
@@ -271,6 +307,8 @@ def main():
             except Exception as exc:
                 dashboard.publish(phase='setup failed',error=f'{type(exc).__name__}: {exc}')
                 print(traceback.format_exc(),flush=True)
+            if args.once:
+                break
             with dashboard.condition:
                 while not dashboard.restart:
                     dashboard.condition.wait(timeout=.5)

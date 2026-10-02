@@ -191,6 +191,32 @@ request, 2.62 s client total (previously 1.68 / 1.97 / 3.13 s). Wall time was
 253 s for 22.6 simulation seconds; about 110 s of that was planning, so most
 remaining wall time is CARLA ticking, Epic rendering and camera capture.
 
+### Cached lossless image transport for `/plan`
+
+Services now advertise `plan_image_cache` in `/health`. The client then sends
+the 12 planner images as lossless WebP, referenced by SHA-256, gzip-compressed,
+and uploads only images the server has not cached (the existing debug-path
+`ServerImageCache`). Pixels are identical to the PNG path (tested), and history
+is still only downsampled. Older services without the flag keep the PNG path.
+A cache miss is rejected before inference and resent once in full; timeouts
+and model errors are still never retried.
+
+With replanning every five ticks, six images per request are reused. The other
+six are the three new current frames plus the previous current frames, which
+re-enter history at the smaller size and are therefore new images.
+
+Live rerun (`outputs/cheddar0-cache-live-001`, same route, fast kernels,
+fixed tracker): completed the route, 35.14 m, 40 plans, 0 rejected, 0 cache
+resends, 0 collisions, 0 red-light events, 2 lane invasions.
+
+| Per plan | PNG transport | Cached WebP |
+| --- | ---: | ---: |
+| Request size | 7.26 MB | 3.40 MB |
+| Server decode | 0.74 s | 0.42 s |
+| GPU inference | 0.72 s | 0.70 s |
+| Client total | 2.62 s | 1.53 s |
+| Wall time / sim time | 253.0 / 22.6 s | 198.6 / 21.2 s |
+
 ## Local tunnel and driving
 
 Keep this command running in a WSL terminal:

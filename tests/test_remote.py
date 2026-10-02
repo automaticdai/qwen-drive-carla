@@ -147,3 +147,70 @@ def test_rl_planner_requires_reasoning_before_model_load():
     from qwen_drive_carla.planner import QwenPlanner
     with pytest.raises(ValueError, match='requires reasoning'):
         QwenPlanner('unused', planner='rl', planning_mode='direct')
+
+
+class SizedPlanner(Planner):
+    loading_info = {'precision': 'test', 'image_sizes': [[320, 192]]*3 + [[640, 384]]}
+    calls = 0
+    def plan_payload(self, payload):
+        self.calls += 1
+        return super().plan_payload(payload)
+
+
+def noisy_records(count=16):
+    rng = np.random.default_rng(3)
+    result = []
+    for i in range(count):
+        images = {k: Image.fromarray(rng.integers(0, 256, (384, 640, 3), dtype=np.uint8))
+                  for k in ('front', 'front_left', 'front_right')}
+        result.append(dict(frame=i+1, timestamp=i*.1, pose=[i, 2, 90], velocity=[0, 3],
+                           acceleration=[0, .1], command='left', images=images))
+    return result
+
+
+def test_cached_plan_transport_matches_png_pixels_and_uploads_only_new_frames():
+    planner, history = SizedPlanner(), noisy_records(21)
+    with service(planner) as client:
+        assert client.transport == 'ssh-http-cached-webp'
+        _, first = client.plan(history[:16])
+        cached = planner.payload
+        expected = decode_scene(encode_scene(scene_payload(history[:16], 15), planner.loading_info['image_sizes']))
+        for tag, images in expected['views'].items():
+            for got, want in zip(cached['views'][tag], images):
+                np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        assert first['images_uploaded'] == 12 and first['images_reused'] == 0
+        # Five ticks later two history images per view are reused. The previous current
+        # frame moves into history at a smaller size, so it is a new image.
+        _, second = client.plan(history[5:21])
+        assert second['images_uploaded'] == 6 and second['images_reused'] == 6
+        assert second['request_bytes'] < first['request_bytes']
+    assert planner.calls == 2
+
+
+def test_plan_cache_miss_resends_once_without_second_inference(monkeypatch):
+    import qwen_drive_carla.remote as remote
+    from qwen_drive_carla.image_transport import ServerImageCache
+    monkeypatch.setattr(remote, 'ServerImageCache', lambda: ServerImageCache(max_items=0))
+    planner, history = SizedPlanner(), noisy_records()
+    with service(planner) as client:
+        client.plan(history)
+        client.known_images = {digest for digest, _ in client.encoder.cache.values()}
+        _, metrics = client.plan(history)
+        assert metrics['cache_resend'] and metrics['images_uploaded'] == 12
+    assert planner.calls == 2
+
+
+def test_old_service_without_cache_flag_uses_png(monkeypatch):
+    planner = SizedPlanner()
+    with service(planner) as client:
+        pass
+    original = RemotePlanner.request
+    def legacy_health(self, path, body=None, content_encoding=None):
+        response = original(self, path, body, content_encoding)
+        response.pop('plan_image_cache', None)
+        return response
+    monkeypatch.setattr(RemotePlanner, 'request', legacy_health)
+    with service(planner) as client:
+        assert client.transport == 'ssh-http-png'
+        _, metrics = client.plan(noisy_records())
+        assert metrics['transport'] == 'ssh-http-png' and 'images_uploaded' not in metrics

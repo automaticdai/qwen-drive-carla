@@ -19,7 +19,7 @@ import numpy as np
 from PIL import Image
 
 from .adapter import COMMANDS, VIEWS, scene_payload
-from .image_transport import ServerImageCache, ImageCacheMiss, unpack_body
+from .image_transport import DebugImageEncoder, ServerImageCache, ImageCacheMiss, unpack_body
 
 VERSION = 1
 MAX_REQUEST = 64 * 1024 * 1024
@@ -103,7 +103,12 @@ class RemotePlanner:
         health = self.request('/health')
         if health.get('protocol') != VERSION or health.get('status') != 'ready':
             raise RuntimeError('Remote planner is not ready or uses a different protocol')
-        self.loading_info = {**health['model_profile'], 'transport': 'ssh-http-png', 'endpoint': self.url}
+        # Older services accept only full PNG scenes; newer ones cache images by digest.
+        self.image_cache = health.get('plan_image_cache') is True and bool(health['model_profile'].get('image_sizes'))
+        self.transport = 'ssh-http-cached-webp' if self.image_cache else 'ssh-http-png'
+        self.encoder = DebugImageEncoder('webp') if self.image_cache else None
+        self.known_images = set()
+        self.loading_info = {**health['model_profile'], 'transport': self.transport, 'endpoint': self.url}
 
     def request(self, path, body=None, content_encoding=None):
         headers = {'Content-Type': 'application/json'}
@@ -128,11 +133,28 @@ class RemotePlanner:
         started = time.perf_counter()
         payload = scene_payload(records, len(records) - 1)
         request_id = uuid.uuid4().hex
-        body = json_bytes(dict(protocol=VERSION, request_id=request_id,
-                               scene=encode_scene(payload, self.loading_info.get('image_sizes'))))
-        if len(body) > MAX_REQUEST:
-            raise ValueError('Scene exceeds transport size limit')
-        response = self.request('/plan', body)
+        stages = {}
+        if self.image_cache:
+            sizes = self.loading_info['image_sizes']
+            body, stages = self.encoder.pack_plan(payload, records, sizes, request_id, self.known_images)
+            try:
+                response = self.request('/plan', body, 'gzip')
+            except ImageCacheMiss:
+                # Rejected before inference, so one full resend cannot plan twice.
+                self.known_images.clear()
+                retry, retry_stages = self.encoder.pack_plan(payload, records, sizes, request_id)
+                response = self.request('/plan', retry, 'gzip')
+                stages.update(cache_resend=True, images_uploaded=retry_stages['images_uploaded'],
+                              images_reused=retry_stages['images_reused'],
+                              wire_bytes=stages['wire_bytes'] + retry_stages['wire_bytes'])
+                body = retry
+            self.known_images = set(response.get('cached_image_ids', []))
+        else:
+            body = json_bytes(dict(protocol=VERSION, request_id=request_id,
+                                   scene=encode_scene(payload, self.loading_info.get('image_sizes'))))
+            if len(body) > MAX_REQUEST:
+                raise ValueError('Scene exceeds transport size limit')
+            response = self.request('/plan', body)
         if (response.get('protocol') != VERSION or response.get('request_id') != request_id or
                 response.get('token') != payload['token']):
             raise RuntimeError('Remote response does not match the requested frame')
@@ -140,9 +162,9 @@ class RemotePlanner:
         if trajectory.shape != (50, 3) or not np.isfinite(trajectory).all():
             raise ValueError('Remote trajectory must contain 50 finite XY/heading rows')
         metrics = response['metrics']
-        return trajectory, {**metrics, 'inference_seconds': metrics['seconds'],
-                            'seconds': time.perf_counter() - started, 'request_bytes': len(body),
-                            'transport': 'ssh-http-png'}
+        return trajectory, {**metrics, **stages, 'inference_seconds': metrics['seconds'],
+                            'seconds': time.perf_counter() - started,
+                            'request_bytes': stages.get('wire_bytes', len(body)), 'transport': self.transport}
 
 
 def make_server(planner, port=8765):
@@ -172,7 +194,8 @@ def make_server(planner, port=8765):
             if self.path != '/health':
                 self.send_json(404, {'error': 'Not found'})
                 return
-            self.send_json(200, dict(protocol=VERSION, status='ready', model_profile=planner.loading_info))
+            self.send_json(200, dict(protocol=VERSION, status='ready', model_profile=planner.loading_info,
+                                     plan_image_cache=True))
 
         def do_POST(self):
             if self.path not in ('/plan', '/debug') or (self.path == '/debug' and not hasattr(planner, 'debug_payload')):
@@ -200,7 +223,7 @@ def make_server(planner, port=8765):
                 if request['protocol'] != VERSION or not isinstance(request['request_id'], str) or not 1 <= len(request['request_id']) <= 64:
                     raise ValueError('Invalid protocol or request ID')
                 scene_data, surround_data = request['scene'], request.get('surround')
-                cached_transport = self.path == '/debug' and 'image_uploads' in request
+                cached_transport = 'image_uploads' in request
                 if cached_transport:
                     scene_data, surround_data = image_cache.resolve(request)
                 payload = decode_scene(scene_data)
@@ -219,10 +242,10 @@ def make_server(planner, port=8765):
                 if self.path == '/debug':
                     trajectory, metrics, bev = planner.debug_payload(payload, surround)
                     extra['bev'] = bev
-                    if cached_transport:
-                        extra['cached_image_ids'] = list(image_cache.images)
                 else:
                     trajectory, metrics = planner.plan_payload(payload)
+                if cached_transport:
+                    extra['cached_image_ids'] = list(image_cache.images)
                 trajectory = np.asarray(trajectory, dtype=float)
                 if self.path == '/debug' and trajectory.ndim == 3:
                     from .candidates import candidate_array

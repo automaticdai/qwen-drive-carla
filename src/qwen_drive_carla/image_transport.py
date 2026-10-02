@@ -1,4 +1,4 @@
-"""Bounded image reuse and lossless WebP transport for debug requests."""
+"""Bounded image reuse and lossless WebP transport for planner and debug requests."""
 import base64
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -63,8 +63,10 @@ class ServerImageCache:
             return value
         scene = dict(request['scene'])
         scene['views'] = {name:[resolve_ref(ref) for ref in refs] for name,refs in scene['views'].items()}
-        surround = dict(request['surround'])
-        surround['images'] = {name:resolve_ref(ref) for name,ref in surround['images'].items()}
+        surround = None
+        if 'surround' in request:
+            surround = dict(request['surround'])
+            surround['images'] = {name:resolve_ref(ref) for name,ref in surround['images'].items()}
         for digest in used:
             value = decoded.get(digest, self.images.get(digest))
             old = self.images.pop(digest, None)
@@ -108,19 +110,31 @@ class DebugImageEncoder:
         return result, False
 
     def pack(self, payload, records, cameras, image_sizes, request_id, known=()):
+        return self._pack(payload, records, image_sizes, request_id, known, cameras)
+
+    def pack_plan(self, payload, records, image_sizes, request_id, known=()):
+        # Planner-only request: the 12 history images, without surround cameras.
+        return self._pack(payload, records, image_sizes, request_id, known)
+
+    def _pack(self, payload, records, image_sizes, request_id, known, cameras=None):
         started = time.perf_counter()
+        records = records[-16:]
         numeric = ('history','history_velocity','history_acceleration','ego_velocity','ego_acceleration')
         scene = {k:np.asarray(payload[k]).tolist() for k in numeric}
         scene.update(nav_command=payload['nav_command'],driving_command=payload['driving_command'],token=payload['token'])
         scene['views'] = {tag:[] for tag in VIEWS.values()}
-        surround = dict(images={}, cameras={name:cameras[name] for name,_,_ in SURROUND})
         jobs = []
         for name, tag in VIEWS.items():
             for index, history_index in enumerate((0,5,10,15)):
                 record = records[history_index]
-                jobs.append((record['images'][name],record['frame'],name,tuple(image_sizes[index])))
+                image, size = record['images'][name], tuple(image_sizes[index])
+                if cameras is None and image.width <= size[0]:
+                    size = image.size  # Like encode_scene: downsample only; the planner resizes.
+                jobs.append((image,record['frame'],name,size))
         current = records[-1]
-        jobs.extend((current['images'][name],current['frame'],name,(896,512)) for name,_,_ in SURROUND)
+        if cameras is not None:
+            surround = dict(images={}, cameras={name:cameras[name] for name,_,_ in SURROUND})
+            jobs.extend((current['images'][name],current['frame'],name,(896,512)) for name,_,_ in SURROUND)
         with ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda job:self.encode(*job),jobs))
         uploads, reused = {}, 0
@@ -136,7 +150,9 @@ class DebugImageEncoder:
             else:
                 reused += 1
         encoded_at = time.perf_counter()
-        request = dict(protocol=1,request_id=request_id,scene=scene,surround=surround,image_uploads=uploads)
+        request = dict(protocol=1,request_id=request_id,scene=scene,image_uploads=uploads)
+        if cameras is not None:
+            request['surround'] = surround
         raw = json.dumps(request,allow_nan=False,separators=(',',':')).encode()
         if len(raw)>LIMIT:
             raise ValueError('Debug request exceeds decoded size limit')

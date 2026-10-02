@@ -76,6 +76,84 @@ bash scripts/start_remote_service.sh
 Inspect with `tail -f service.log`. Stop it with
 `tmux send-keys -t qwen-drive-agent C-c` on the VM.
 
+## York cheddar0 (GH200) deployment
+
+`cheddar0` (`~/.ssh/config` host, reached via the `york` jump host) has one
+NVIDIA GH200 480GB (97.9 GB HBM), 72 Grace cores, Ubuntu 24.04 and **aarch64**
+Python 3.12. CARLA publishes no aarch64 client wheels, so `scripts/setup.sh`
+skips the `carla` package on non-x86_64 hosts. The host only serves the model;
+CARLA and the controller stay on the Windows/WSL machine as before. The machine
+is shared: check `nvidia-smi` before starting a service.
+
+```bash
+bash scripts/deploy_ssh.sh cheddar0          # rsync source, set up envs, download weights
+ssh cheddar0 'cd ~/RELEASE_DIRECTORY && bash scripts/start_remote_service.sh quality'
+bash scripts/tunnel_ssh.sh cheddar0          # keep running; forwards 127.0.0.1:8765
+```
+
+The tunnel replaces `tunnel_gcp.sh`; every `--planner-url http://127.0.0.1:8765`
+command below works unchanged. The 2026-10-02 release is
+`/home/dais/qwen-drive-20261002T081854Z-803545` (tmux session `qwen-drive-agent`).
+All 128 tests pass there. The `debug` (BEV) profile has not been set up on
+cheddar0: `setup_bev_cloud.sh` pins x86 CUDA 12.9 / sm_89 settings.
+
+Recorded-scene smoke test (`record-002`, index 30, quality profile, BF16 SFT
+direct, high inputs, 4.57 MB request):
+
+| Request | Client total | Server GPU inference |
+| --- | ---: | ---: |
+| Cold | 7.36 s | 6.22 s |
+| Warm | 3.40 s | 2.47 s |
+
+Peak reserved CUDA memory was 15.8 GB. For comparison, the L4 live quality run
+averaged 3.75 s server inference ([quality results](quality-results.md)); that
+is a live-episode mean, not the same single-scene measurement. The runtime is
+still SDPA without FlashAttention or other native kernels.
+
+Live Town01 episode (`outputs/cheddar0-live-001`), same route and settings as
+the L4 quality run (spawn 2 → 133, 25 s, 3 m/s cap, high cameras, Epic):
+
+| Metric | cheddar0 GH200 | L4 quality run |
+| --- | ---: | ---: |
+| Outcome | Time limit, 74% progress | Completed |
+| Distance (model-driven) | 28.36 m (25.41 m) | 32.02 m |
+| Collisions / lane invasions / rejected plans | 0 / 2 / 0 | 0 / 0 / 0 |
+| Mean client planning time | 3.30 s | 6.48 s (warm) |
+| Mean server inference | 1.79 s | 3.75 s |
+| Wall-clock | 305.9 s for 25 sim s | 356.49 s for 19.9 sim s |
+
+Shortly after handover the model's trajectories slowed the car to a stop for
+about 9 simulation seconds with no traffic light or nearby vehicle, after which
+it resumed. That stall, not latency, caused the time limit. One episode does not
+show whether GH200 numerics differ from the L4 run; the planner is sampled.
+
+The `reasoning` profile (BF16 RL expert, reasoning mode) on the same route
+(`outputs/cheddar0-reasoning-001`) averaged 4.56 s client / 2.99 s server per
+plan (L4: 7.76 s client). It reached only 21% progress (7.51 m, 4.56 m
+model-driven), with no collisions, lane invasions or rejected plans, while every
+reasoning string said to accelerate on a clear road.
+
+Both stalls share one pattern. While the car was below 0.3 m/s, 17 of 20 plans
+(quality) and 40 of 42 (reasoning) moved less than 0.3 m in the first 0.5 s but
+more than 5 m by 5 s: hold, then go. `TrajectoryTracker.step` (`src/qwen_drive_carla/controller.py`) sets the target
+speed from the three waypoints at the current plan age, and replanning every
+0.5 s means only the first few waypoints are ever used. Target speed stays below
+or near the 0.15 m/s stop threshold, so the car never leaves the "hold" segment.
+
+Fix: below `launch_speed` (0.5 m/s) the tracker uses the larger of the
+near-term target and the mean planned speed over `launch_window` (2 s).
+Replaying the 62 stopped-state plans above raised the median target from
+0.15 / 0.22 m/s to 0.95 / 0.97 m/s. A plan that holds for the whole window
+still stops. `drive-run` has no red-light guard, so this can launch a plan that
+expects a light to change; review signals before using it on routes with lights.
+
+Live rerun with the quality profile and the fixed tracker
+(`outputs/cheddar0-launch-001`): **completed the route** in 18.2 simulation
+seconds / 216.3 wall seconds, 35.11 m (32.17 m model-driven), 34 plans, 0
+rejected, 0 collisions, 0 red-light events, 2 lane invasions, max deviation
+1.51 m. Warm planning averaged 3.13 s client / 1.68 s server. The car briefly
+stopped after handover (4 ticks below 0.1 m/s) and then pulled away.
+
 ## Local tunnel and driving
 
 Keep this command running in a WSL terminal:

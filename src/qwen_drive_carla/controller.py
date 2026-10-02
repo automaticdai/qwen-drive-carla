@@ -28,14 +28,17 @@ def validate_trajectory(trajectory):
 
 
 class TrajectoryTracker:
-    def __init__(self, max_speed=8.0, wheelbase=2.8, max_steer_degrees=35.0, max_age=0.6):
+    def __init__(self, max_speed=8.0, wheelbase=2.8, max_steer_degrees=35.0, max_age=0.6,
+                 launch_speed=0.5, launch_window=2.0):
         if not all(math.isfinite(x) and x > 0 for x in
-                   (max_speed, wheelbase, max_steer_degrees, max_age)):
+                   (max_speed, wheelbase, max_steer_degrees, max_age, launch_speed, launch_window)):
             raise ValueError("Controller limits must be finite and positive")
         self.max_speed = max_speed
         self.wheelbase = wheelbase
         self.max_steer = math.radians(max_steer_degrees)
         self.max_age = min(max_age, 4.9)
+        self.launch_speed = launch_speed
+        self.launch_steps = max(3, min(int(round(launch_window / 0.1)), 50))
         self.world_xy = None
         self.plan_time = None
         self.speeds = None
@@ -77,6 +80,12 @@ class TrajectoryTracker:
         local = ego_vectors(self.world_xy - np.asarray(pose[:2]), pose[2])
         candidates = np.flatnonzero((np.arange(50) >= index) & (local[:, 0] > 0.1))
         target_speed = min(float(np.mean(self.speeds[index:min(index + 3, 50)])), self.max_speed)
+        if speed < self.launch_speed:
+            # From standstill Qwen often plans a short hold or creep before accelerating.
+            # Replanning every 0.5 s would otherwise only ever track that start, so also
+            # use the mean speed over a longer window.
+            launch = float(np.mean(self.speeds[index:min(index + self.launch_steps, 50)]))
+            target_speed = max(target_speed, min(launch, self.max_speed))
         if target_speed < 0.15 or len(candidates) == 0:
             return self.stop("stationary_or_behind")
         # Pure pursuit uses a spatial lookahead; plan age chooses the speed interval.

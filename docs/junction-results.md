@@ -85,3 +85,26 @@ See [scenario testing](scenario-testing.md) for the command and scope. Each run
 needs a new output directory, or `--resume` to skip already-recorded results.
 The next useful expansion is a scripted encounter with a known crossing vehicle
 or stopped lead car, plus traffic-light violation scoring and repeated seeds.
+
+## cheddar0 rerun — 2026-10-02
+
+`outputs/cheddar0-junctions-001`: the same suite, with Qwen served from the cheddar0
+GH200 (BF16 SFT direct, high inputs, flash-linear-attention, cached WebP
+transport) and the standstill-launch tracker fix. High camera profile, Epic,
+seed 42, 45 s limit, 4 m/s cap, autopilot references.
+
+| Scenario | Autopilot reference | Qwen |
+| --- | --- | --- |
+| Right, clear | Completed, clean | **Completed, clean**: 55.1 m model distance, 0 collision / lane events, 58 plans, 0 rejected |
+| Left, clear | Red-light violation at 2.2 s | Red-light violation at 2.2 s |
+| Left, traffic | Red-light violation at 2.2 s | Red-light violation at 2.2 s |
+| Left, traffic, wet | Red-light violation at 2.2 s | Red-light violation at 2.2 s |
+
+The left-turn results are invalid as model tests. After
+`reset_all_traffic_lights()`, light 29 (stop line about 8 m ahead of spawn 241)
+is red. The 1.5 s autopilot warm-up accelerates to about 4 m/s and crosses it on
+red at 2.2 s, in the reference and Qwen runs alike; Qwen had driven 2.3 m. The
+2026-09-19 runs predate signal scoring, so this crossing was not detected then.
+Candidate fixes, not yet implemented: a per-scenario brake warm-up, so Qwen
+starts stopped at the red light (this also tests the launch rule at a signal);
+setting light 29 green at the start; or moving the spawn further back.

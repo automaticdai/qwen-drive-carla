@@ -9,6 +9,11 @@ if ! command -v uv >/dev/null; then
     export PATH="$PWD/.bootstrap/bin:$PATH"
 fi
 bash scripts/setup.sh
+# Triton kernels for the 24 gated-delta-net layers; no compiler needed. Measured on
+# the GH200: 1.74 s -> 0.76 s warm inference. Set QWEN_FLA=0 to keep the torch fallback.
+if [[ ${QWEN_FLA:-1} == 1 ]]; then
+    uv pip install --python .venv-qwen/bin/python 'flash-linear-attention==0.5.2'
+fi
 .venv/bin/python scripts/download_model.py --include-rl
 .venv-qwen/bin/python - <<'PY'
 import torch

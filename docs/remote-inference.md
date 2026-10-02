@@ -154,6 +154,43 @@ rejected, 0 collisions, 0 red-light events, 2 lane invasions, max deviation
 1.51 m. Warm planning averaged 3.13 s client / 1.68 s server. The car briefly
 stopped after handover (4 ticks below 0.1 m/s) and then pulled away.
 
+### Fast linear-attention kernels on cheddar0
+
+24 of the 32 Qwen3.5 language layers are gated delta-net (linear attention).
+Without `flash-linear-attention` and `causal-conv1d`, transformers runs them
+with a pure-PyTorch fallback. `setup_cloud.sh` now installs
+`flash-linear-attention==0.5.2` (Triton only, no compiler; `QWEN_FLA=0` skips
+it). `causal-conv1d==1.7.0` was also built on cheddar0 (9 min):
+
+```bash
+export PATH=/usr/local/cuda-13.2/bin:$PATH CUDA_HOME=/usr/local/cuda-13.2 TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS=16
+uv pip install --python .venv-qwen/bin/python ninja packaging wheel setuptools
+uv pip install --python .venv-qwen/bin/python --no-build-isolation causal-conv1d
+```
+
+Recorded-scene smoke test (`record-002` index 30, quality profile), warm
+requests:
+
+| Kernels | Server GPU inference | Client total |
+| --- | ---: | ---: |
+| PyTorch fallback (4 runs) | 1.69–1.79 s | — |
+| + flash-linear-attention (4 warm) | 0.75–0.77 s | — |
+| + causal-conv1d (4 warm) | 0.73–0.75 s | 1.91 s |
+
+The first request after a fresh install took 34 s (Triton compilation); with
+the kernel cache populated, a restarted service's first request took 2.4 s.
+Repeated requests are deterministic within each configuration. Across kernel
+configurations the trajectory differs by at most 0.65 m at any waypoint, with
+the same endpoint (52.85 m ahead), consistent with BF16 numerical differences.
+`causal-conv1d` adds little; `flash-linear-attention` provides the gain.
+
+Live rerun (`outputs/cheddar0-kernels-live-001`, same route and fixed tracker):
+completed the route, 35.15 m, 42 plans, 0 rejected, 0 collisions, 0 red-light
+events, 2 lane invasions. Per plan: 0.72 s GPU inference, 1.45 s server
+request, 2.62 s client total (previously 1.68 / 1.97 / 3.13 s). Wall time was
+253 s for 22.6 simulation seconds; about 110 s of that was planning, so most
+remaining wall time is CARLA ticking, Epic rendering and camera capture.
+
 ## Local tunnel and driving
 
 Keep this command running in a WSL terminal:
